@@ -1,0 +1,18 @@
+{
+    "fileName": "data.xlsx",
+    "sheetName": "Sheet1",
+    "filter":[
+        {
+            "row":4,
+            "value":""
+        },
+        {
+            "row":7,
+            "value":"1"
+        }
+    ],
+    "needCols":[1,2,3,4,5,6,7,8,9],
+    "outFile": "filter.xlsx",
+    "readOnlyFile": "filter.xlsx",
+    "processFilter": 1
+}
