@@ -57,8 +57,12 @@ func DoProcessFile(rowArray [][]string, config *FilterConfig, streamWriter *exce
 		for _, val := range config.Filter {
 			col := val.Row - 1
 
-			//fmt.Printf("%v:%v %v:%v\n", readLine, col, rowArray[readLine][col], val.Value)
-			if rowArray[readLine][col] != val.Value {
+			if len(rowArray[readLine]) > col {
+				if rowArray[readLine][col] != val.Value {
+					needRaw = false
+					break
+				}
+			} else if val.Value != "" {
 				needRaw = false
 				break
 			}
@@ -70,7 +74,9 @@ func DoProcessFile(rowArray [][]string, config *FilterConfig, streamWriter *exce
 
 			for index, val := range config.NeedCols {
 				col := val - 1
-				row[index] = rowArray[readLine][col]
+				if len(rowArray[readLine]) > col {
+					row[index] = rowArray[readLine][col]
+				}
 			}
 
 			writePos, _ := excelize.CoordinatesToCellName(1, writeLine)
@@ -115,6 +121,9 @@ func main() {
 		if err := processFile.Close(); err != nil {
 			fmt.Printf("Close error:%v\n", err)
 		}
+
+		fmt.Printf("after 60s exit...\n")
+		time.Sleep(60 * time.Second)
 	}()
 
 	// 获取 Sheet1 上所有单元格
@@ -135,37 +144,43 @@ func main() {
 			fmt.Printf("NewStreamWriter error:%v\n", err)
 			return
 		}
+		fmt.Printf("creater new file\n")
 
 		styleID, err := newfile.NewStyle(&excelize.Style{Font: &excelize.Font{Color: "#777777"}})
 		if err != nil {
-			fmt.Println(err)
+			fmt.Printf("NewStyle error:%v\n", err)
+			return
 		}
+		fmt.Printf("set NewStyle\n")
 
 		if err := streamWriter.SetRow("A1", []interface{}{
 			excelize.Cell{StyleID: styleID, Value: "Title"}}); err != nil {
-			fmt.Println(err)
+			fmt.Printf("SetRow error:%v\n", err)
+			return
 		}
+		fmt.Printf("SetRow title\n")
 
 		getRow, err := DoProcessFile(rowArray, config, streamWriter)
 		if err != nil {
 			fmt.Printf("DoProcessFile error:%v\n", err)
 			return
 		}
+		fmt.Printf("DoProcessFile\n")
 
 		if err := streamWriter.Flush(); err != nil {
 			fmt.Printf("Flush error:%v\n", err)
 			return
 		}
+		fmt.Printf("Flush to file\n")
 
 		if err := newfile.SaveAs(config.OutFile); err != nil {
 			fmt.Printf("SaveAs error:%v\n", err)
+			return
 		}
 		fmt.Printf("processing... getRow:%v time:%v\n", getRow, time.Since(startT))
 	} else {
 		fmt.Printf("Not processing!!!!!!!!!!\n")
 	}
 
-	fmt.Printf("after 30s exit...\n")
-	time.Sleep(30 * time.Second)
 	return
 }
