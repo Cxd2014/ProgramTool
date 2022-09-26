@@ -13,9 +13,9 @@ import (
 type FilterConfig struct {
 	FileName  string
 	SheetName string
-	Filter    []struct {
-		Row   int    // 需要过滤的行
-		Value string // 已此值来过滤
+	Filter    []struct { // 多个 filter 是 与 的关系
+		Row   int      // 需要过滤的行
+		Value []string // 已此值来过滤，多个值是 或 的关系
 	}
 	NeedCols      []int // 需要提取的行
 	OutFile       string
@@ -53,18 +53,27 @@ func DoProcessFile(rowArray [][]string, config *FilterConfig, streamWriter *exce
 	readLine := 0
 	for readLine < rowLen {
 
-		var needRaw bool = true
-		for _, val := range config.Filter {
-			col := val.Row - 1
+		var needRaw bool = false
+		for index, filter := range config.Filter {
+			col := filter.Row - 1
 
-			if len(rowArray[readLine]) > col {
-				if rowArray[readLine][col] != val.Value {
-					needRaw = false
+			var isMatch bool = false
+			for _, val := range filter.Value {
+				if len(rowArray[readLine]) > col {
+					if rowArray[readLine][col] == val {
+						isMatch = true
+						break
+					}
+				} else if val == "" {
+					isMatch = true
 					break
 				}
-			} else if val.Value != "" {
-				needRaw = false
+			}
+
+			if isMatch == false {
 				break
+			} else if (index + 1) == len(config.Filter) {
+				needRaw = true
 			}
 		}
 
@@ -99,7 +108,8 @@ func main() {
 	startT := time.Now()
 	config, err := ReadConfigFile()
 	if err != nil {
-		fmt.Printf("ReadConfigFile error:%v\n", err)
+		fmt.Printf("ReadConfigFile error:%v\nafter 30s exit...", err)
+		time.Sleep(30 * time.Second)
 		return
 	}
 	fmt.Printf("config:%+v\n", config)
@@ -113,7 +123,8 @@ func main() {
 	}
 	processFile, err := excelize.OpenFile(fileName)
 	if err != nil {
-		fmt.Printf("OpenFile error:%v\n", err)
+		fmt.Printf("OpenFile error:%v\nafter 30s exit...", err)
+		time.Sleep(30 * time.Second)
 		return
 	}
 
@@ -133,6 +144,11 @@ func main() {
 		return
 	}
 
+	if len(rowArray) < 2 {
+		fmt.Printf("row len less then 2 no need to process\n")
+		return
+	}
+
 	fmt.Printf("table title:%v\nline1:%v\n", rowArray[0], rowArray[1])
 	fmt.Printf("processing... rowLen:%v colLen:%v time:%v\n", len(rowArray), len(rowArray[0]), time.Since(startT))
 
@@ -146,15 +162,24 @@ func main() {
 		}
 		fmt.Printf("creater new file\n")
 
-		styleID, err := newfile.NewStyle(&excelize.Style{Font: &excelize.Font{Color: "#777777"}})
+		styleID, err := newfile.NewStyle(&excelize.Style{Font: &excelize.Font{Color: "#000000"}})
 		if err != nil {
 			fmt.Printf("NewStyle error:%v\n", err)
 			return
 		}
 		fmt.Printf("set NewStyle\n")
 
-		if err := streamWriter.SetRow("A1", []interface{}{
-			excelize.Cell{StyleID: styleID, Value: "Title"}}); err != nil {
+		// 获取标题
+		titleRow := make([]interface{}, len(config.NeedCols))
+		for index, val := range config.NeedCols {
+			col := val - 1
+			if len(rowArray[0]) > col {
+				titleRow[index] = excelize.Cell{StyleID: styleID, Value: rowArray[0][col]}
+			}
+		}
+
+		writePos, _ := excelize.CoordinatesToCellName(1, 1)
+		if err := streamWriter.SetRow(writePos, titleRow); err != nil {
 			fmt.Printf("SetRow error:%v\n", err)
 			return
 		}
