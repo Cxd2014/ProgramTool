@@ -170,8 +170,8 @@ var isProcessing int = 1
 
 func Processing(startT time.Time) {
 	for {
+		time.Sleep(10 * time.Second)
 		if isProcessing == 1 {
-			time.Sleep(10 * time.Second)
 			fmt.Printf("processing... time:%v\n", time.Since(startT))
 		}
 	}
