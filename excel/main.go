@@ -2,9 +2,10 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io/ioutil"
+	"os"
+	"strconv"
 	"time"
 
 	excelize "github.com/xuri/excelize/v2"
@@ -21,6 +22,16 @@ type FilterConfig struct {
 	OutFile       string
 	ProcessFilter int
 	ReadOnlyFile  string
+	NeedTxt       int
+	OutTxtFiles   []struct {
+		newFile  *os.File
+		Name     string
+		Template string
+		Filter   []struct { // 多个 filter 是 与 的关系
+			Row   int      // 需要过滤的行
+			Value []string // 已此值来过滤，多个值是 或 的关系
+		}
+	}
 }
 
 func ReadConfigFile() (*FilterConfig, error) {
@@ -38,12 +49,59 @@ func ReadConfigFile() (*FilterConfig, error) {
 		return nil, err
 	}
 
-	if len(config.NeedCols) > 26 {
-		fmt.Printf("NeedCols more then 26 error:%v\n", err)
-		return nil, errors.New("NeedCols greater then 26 error!")
+	return config, nil
+}
+
+func ProcessTxtFile(rowArray [][]string, config *FilterConfig, readLine int) error {
+
+	mapper := func(placeholderName string) string {
+		for _, val := range config.NeedCols {
+			col := val - 1
+			if (strconv.Itoa(val) == placeholderName) &&
+				(len(rowArray[readLine]) > col) {
+				return rowArray[readLine][col]
+			}
+		}
+		return ""
 	}
 
-	return config, nil
+	for i := range config.OutTxtFiles {
+
+		var needRaw bool = false
+		for index, filter := range config.OutTxtFiles[i].Filter {
+			col := filter.Row - 1
+
+			var isMatch bool = false
+			for _, val := range filter.Value {
+				if len(rowArray[readLine]) > col {
+					if rowArray[readLine][col] == val {
+						isMatch = true
+						break
+					}
+				} else if val == "" {
+					isMatch = true
+					break
+				}
+			}
+
+			if isMatch == false {
+				break
+			} else if (index + 1) == len(config.OutTxtFiles[i].Filter) {
+				needRaw = true
+			}
+		}
+
+		if needRaw {
+			needstr := os.Expand(config.OutTxtFiles[i].Template, mapper) + "\n"
+			_, err := config.OutTxtFiles[i].newFile.WriteString(needstr)
+			if err != nil {
+				fmt.Printf("WriteString error:%v\n", err)
+				return err
+			}
+		}
+	}
+
+	return nil
 }
 
 func DoProcessFile(rowArray [][]string, config *FilterConfig, streamWriter *excelize.StreamWriter) (int, error) {
@@ -93,6 +151,12 @@ func DoProcessFile(rowArray [][]string, config *FilterConfig, streamWriter *exce
 				fmt.Printf("SetRow error:%v\n", err)
 				return 0, err
 			}
+
+			if config.NeedTxt == 1 {
+				if err := ProcessTxtFile(rowArray, config, readLine); err != nil {
+					fmt.Printf("ProcessTxtFile error:%v\n", err)
+				}
+			}
 		}
 
 		readLine++
@@ -100,6 +164,17 @@ func DoProcessFile(rowArray [][]string, config *FilterConfig, streamWriter *exce
 
 	return writeLine, nil
 
+}
+
+var isProcessing int = 1
+
+func Processing(startT time.Time) {
+	for {
+		if isProcessing == 1 {
+			time.Sleep(10 * time.Second)
+			fmt.Printf("processing... time:%v\n", time.Since(startT))
+		}
+	}
 }
 
 // env GOOS=windows GOARCH=amd64 go build -o excel.exe 编译windows可执行文件
@@ -129,14 +204,36 @@ func main() {
 	}
 
 	defer func() {
+		isProcessing = 0
 		if err := processFile.Close(); err != nil {
 			fmt.Printf("Close error:%v\n", err)
+		}
+
+		if config.NeedTxt == 1 {
+			for i := range config.OutTxtFiles {
+				if config.OutTxtFiles[i].newFile != nil {
+					if err := config.OutTxtFiles[i].newFile.Close(); err != nil {
+						fmt.Printf("Close error:%v\n", err)
+					}
+				}
+			}
 		}
 
 		fmt.Printf("after 60s exit...\n")
 		time.Sleep(60 * time.Second)
 	}()
 
+	if config.NeedTxt == 1 {
+		for i := range config.OutTxtFiles {
+			config.OutTxtFiles[i].newFile, err = os.OpenFile(config.OutTxtFiles[i].Name, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if err != nil {
+				fmt.Printf("Open txt File error:%v\n", err)
+				return
+			}
+		}
+	}
+
+	go Processing(startT)
 	// 获取 Sheet1 上所有单元格
 	rowArray, err := processFile.GetRows(config.SheetName)
 	if err != nil {
@@ -202,7 +299,9 @@ func main() {
 			fmt.Printf("SaveAs error:%v\n", err)
 			return
 		}
-		fmt.Printf("processing... getRow:%v time:%v\n", getRow, time.Since(startT))
+
+		isProcessing = 0
+		fmt.Printf("process done getRow:%v time:%v\n", getRow, time.Since(startT))
 	} else {
 		fmt.Printf("Not processing!!!!!!!!!!\n")
 	}
