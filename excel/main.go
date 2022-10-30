@@ -11,13 +11,15 @@ import (
 	excelize "github.com/xuri/excelize/v2"
 )
 
+type Filter struct {
+	Row   int      // 需要过滤的行
+	Value []string // 已此值来过滤，多个值是 或 的关系
+}
+
 type FilterConfig struct {
-	FileName  string
-	SheetName string
-	Filter    []struct { // 多个 filter 是 与 的关系
-		Row   int      // 需要过滤的行
-		Value []string // 已此值来过滤，多个值是 或 的关系
-	}
+	FileName      string
+	SheetName     string
+	Filter        []Filter
 	NeedCols      []int // 需要提取的行
 	OutFile       string
 	ProcessFilter int
@@ -27,10 +29,7 @@ type FilterConfig struct {
 		newFile  *os.File
 		Name     string
 		Template string
-		Filter   []struct { // 多个 filter 是 与 的关系
-			Row   int      // 需要过滤的行
-			Value []string // 已此值来过滤，多个值是 或 的关系
-		}
+		Filter   []Filter
 	}
 }
 
@@ -52,46 +51,54 @@ func ReadConfigFile() (*FilterConfig, error) {
 	return config, nil
 }
 
-func ProcessTxtFile(rowArray [][]string, config *FilterConfig, readLine int) error {
+func DoFilter(filters []Filter, rowArray []string) bool {
+
+	var needRaw bool = false
+	for index, filter := range filters {
+		col := filter.Row - 1
+
+		var isMatch bool = false
+		for _, val := range filter.Value {
+			if len(rowArray) > col {
+				if rowArray[col] == val {
+					isMatch = true
+					break
+				}
+			} else if val == "" {
+				isMatch = true
+				break
+			}
+		}
+
+		if isMatch == false {
+			break
+		} else if (index + 1) == len(filters) {
+			needRaw = true
+		}
+	}
+
+	if len(filters) == 0 { // 没有过滤条件时输出全部行
+		needRaw = true
+	}
+
+	return needRaw
+}
+
+func ProcessTxtFile(rowArray []string, config *FilterConfig) error {
 
 	mapper := func(placeholderName string) string {
 		for _, val := range config.NeedCols {
 			col := val - 1
 			if (strconv.Itoa(val) == placeholderName) &&
-				(len(rowArray[readLine]) > col) {
-				return rowArray[readLine][col]
+				(len(rowArray) > col) {
+				return rowArray[col]
 			}
 		}
 		return ""
 	}
 
 	for i := range config.OutTxtFiles {
-
-		var needRaw bool = false
-		for index, filter := range config.OutTxtFiles[i].Filter {
-			col := filter.Row - 1
-
-			var isMatch bool = false
-			for _, val := range filter.Value {
-				if len(rowArray[readLine]) > col {
-					if rowArray[readLine][col] == val {
-						isMatch = true
-						break
-					}
-				} else if val == "" {
-					isMatch = true
-					break
-				}
-			}
-
-			if isMatch == false {
-				break
-			} else if (index + 1) == len(config.OutTxtFiles[i].Filter) {
-				needRaw = true
-			}
-		}
-
-		if needRaw {
+		if DoFilter(config.OutTxtFiles[i].Filter, rowArray) {
 			needstr := os.Expand(config.OutTxtFiles[i].Template, mapper) + "\n"
 			_, err := config.OutTxtFiles[i].newFile.WriteString(needstr)
 			if err != nil {
@@ -111,31 +118,7 @@ func DoProcessFile(rowArray [][]string, config *FilterConfig, streamWriter *exce
 	readLine := 0
 	for readLine < rowLen {
 
-		var needRaw bool = false
-		for index, filter := range config.Filter {
-			col := filter.Row - 1
-
-			var isMatch bool = false
-			for _, val := range filter.Value {
-				if len(rowArray[readLine]) > col {
-					if rowArray[readLine][col] == val {
-						isMatch = true
-						break
-					}
-				} else if val == "" {
-					isMatch = true
-					break
-				}
-			}
-
-			if isMatch == false {
-				break
-			} else if (index + 1) == len(config.Filter) {
-				needRaw = true
-			}
-		}
-
-		if needRaw {
+		if DoFilter(config.Filter, rowArray[readLine]) {
 			writeLine++
 			row := make([]interface{}, len(config.NeedCols))
 
@@ -153,7 +136,7 @@ func DoProcessFile(rowArray [][]string, config *FilterConfig, streamWriter *exce
 			}
 
 			if config.NeedTxt == 1 {
-				if err := ProcessTxtFile(rowArray, config, readLine); err != nil {
+				if err := ProcessTxtFile(rowArray[readLine], config); err != nil {
 					fmt.Printf("ProcessTxtFile error:%v\n", err)
 				}
 			}
