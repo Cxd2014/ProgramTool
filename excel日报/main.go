@@ -51,6 +51,7 @@ type SheetInfo struct {
 
 type FilterConfig struct {
 	FileName         string    `json:"fileName"`
+	Date             string    `json:"Date"`
 	SummarySheetInfo SheetInfo `json:"summarySheetInfo"`
 	DetailSheetInfo  SheetInfo `json:"detailSheetInfo"`
 }
@@ -88,7 +89,7 @@ func ReadConfigFile() (*FilterConfig, error) {
 	dsi.jietong = titleToNumber(dsi.StrJietong) - 1
 	dsi.chengdan = titleToNumber(dsi.StrChengdan) - 1
 	dsi.renwu = titleToNumber(dsi.StrRenwu) - 1
-	dsi.date = titleToNumber(dsi.StrDate)
+	dsi.date = titleToNumber(dsi.StrDate) - 1
 
 	fmt.Printf("init config:%+v\n", config)
 	return config, nil
@@ -101,8 +102,6 @@ type dailiShangInfo struct {
 	Waihu    int
 	Jietong  int
 	Chengdan int
-
-	Date string
 }
 
 type projectInfo struct {
@@ -125,10 +124,6 @@ func getTableData(processFile *excelize.File, sheet SheetInfo) []projectInfo {
 		return nil
 	}
 
-	if sheet.rowEnd == 0 {
-		sheet.rowEnd = len(rowArray)
-	}
-
 	projects := make([]projectInfo, 0)
 	for i := sheet.rowStart; i < sheet.rowEnd; i++ {
 		if rowArray[i][sheet.xiangmu] != "" {
@@ -139,20 +134,15 @@ func getTableData(processFile *excelize.File, sheet SheetInfo) []projectInfo {
 		}
 		project := &projects[len(projects)-1]
 
-		date := ""
-		if sheet.date != 0 {
-			date = excelDateToDate(rowArray[i][sheet.date-1])
-		}
 		waihu, _ := strconv.Atoi(rowArray[i][sheet.waihu])
 		jietong, _ := strconv.Atoi(rowArray[i][sheet.jietong])
 		chengdan, _ := strconv.Atoi(rowArray[i][sheet.chengdan])
 		project.DailiShang = append(project.DailiShang, dailiShangInfo{
 			Name:     rowArray[i][sheet.dailishang],
-			Row:      i,
+			Row:      i + 1,
 			Waihu:    waihu,
 			Jietong:  jietong,
 			Chengdan: chengdan,
-			Date:     date,
 		})
 
 		project.Count++
@@ -161,19 +151,18 @@ func getTableData(processFile *excelize.File, sheet SheetInfo) []projectInfo {
 	return projects
 }
 
-func generateDateTable(processFile *excelize.File, sheet SheetInfo) {
-	// 获取 sheet 上所有单元格
-	rowArray, err := processFile.GetRows(sheet.SheetName)
-	if err != nil {
-		fmt.Printf("GetRows error:%v\n", err)
-		return
-	}
+func generateDateTable(processFile *excelize.File, config *FilterConfig, rowArray [][]string) {
 
+	fmt.Printf("\ngenerateDateTable.......\n")
+	sheet := config.DetailSheetInfo
 	sheet.rowEnd = len(rowArray)
-	today := "1月2日" //time.Now().Format("1月2日")
-	month := strconv.Itoa(int(time.Now().Month())) + "月"
 
-	fmt.Printf("month:%v today:%v\n", month, today)
+	today := config.Date
+	if config.Date == "" {
+		today = time.Now().Format("1月2日")
+	}
+	month := today[:4]
+	fmt.Printf("month:%v today:%v %v %v\n", month, today, len(month), len(today))
 
 	todayRows := make([][]string, 0)
 
@@ -181,7 +170,7 @@ func generateDateTable(processFile *excelize.File, sheet SheetInfo) {
 	companyMap := make(map[string]bool)
 
 	for i := sheet.rowStart; i < sheet.rowEnd; i++ {
-		if today == excelDateToDate(rowArray[i][sheet.date-1]) {
+		if today == excelDateToDate(rowArray[i][sheet.date]) {
 			todayRows = append(todayRows, rowArray[i])
 			projectMap[rowArray[i][sheet.xiangmu]] = true
 			companyMap[rowArray[i][sheet.dailishang]] = true
@@ -268,6 +257,101 @@ func generateDateTable(processFile *excelize.File, sheet SheetInfo) {
 	}
 }
 
+func generateSummaryTable(processFile *excelize.File, config *FilterConfig, rowArray [][]string, summaryData []projectInfo) {
+	fmt.Printf("\ngenerateSummaryTable.......\n")
+
+	sheet := config.DetailSheetInfo
+	sheet.rowEnd = len(rowArray)
+	projectMap := make(map[string]bool)
+	companyMap := make(map[string]bool)
+	for i := sheet.rowStart; i < sheet.rowEnd; i++ {
+		projectMap[rowArray[i][sheet.xiangmu]] = true
+		companyMap[rowArray[i][sheet.dailishang]] = true
+	}
+
+	totalMap := make(map[string]map[string][3]int)
+	for project, _ := range projectMap {
+		temp := make(map[string][3]int)
+		for company, _ := range companyMap {
+			for i := sheet.rowStart; i < sheet.rowEnd; i++ {
+				row := rowArray[i]
+				if row[sheet.xiangmu] == project &&
+					row[sheet.dailishang] == company {
+
+					waihu, _ := strconv.Atoi(row[sheet.waihu])
+					jietong, _ := strconv.Atoi(row[sheet.jietong])
+					chengdan, _ := strconv.Atoi(row[sheet.chengdan])
+
+					t := temp[row[sheet.dailishang]]
+					t[0] = t[0] + waihu
+					t[1] = t[1] + jietong
+					t[2] = t[2] + chengdan
+					temp[row[sheet.dailishang]] = t
+				}
+			}
+		}
+		totalMap[project] = temp
+	}
+	fmt.Printf("totalMap: %+v\n", totalMap)
+
+	summarySheet := config.SummarySheetInfo
+	for _, project := range summaryData {
+
+		waihuTotal := 0
+		jietongTotal := 0
+		chengdanTotal := 0
+		for _, company := range project.DailiShang {
+
+			fmt.Printf("SetCellValue: %v %v ", project.Name, company.Name)
+
+			axis := summarySheet.StrWaihu + strconv.Itoa(company.Row)
+			waihu := totalMap[project.Name][company.Name][0]
+			waihuTotal = waihuTotal + waihu
+			if company.Name == "累计" {
+				processFile.SetCellValue(summarySheet.SheetName, axis, waihuTotal)
+				fmt.Printf("%v %v ", axis, waihuTotal)
+			} else {
+				if waihu == 0 {
+					processFile.SetCellValue(summarySheet.SheetName, axis, "/")
+				} else {
+					processFile.SetCellValue(summarySheet.SheetName, axis, waihu)
+				}
+				fmt.Printf("%v %v ", axis, waihu)
+			}
+
+			axis = summarySheet.StrJietong + strconv.Itoa(company.Row)
+			jietong := totalMap[project.Name][company.Name][1]
+			jietongTotal = jietongTotal + jietong
+			if company.Name == "累计" {
+				processFile.SetCellValue(summarySheet.SheetName, axis, jietongTotal)
+				fmt.Printf("%v %v ", axis, jietongTotal)
+			} else {
+				if jietong == 0 {
+					processFile.SetCellValue(summarySheet.SheetName, axis, "/")
+				} else {
+					processFile.SetCellValue(summarySheet.SheetName, axis, jietong)
+				}
+				fmt.Printf("%v %v ", axis, jietong)
+			}
+
+			axis = summarySheet.StrChengdan + strconv.Itoa(company.Row)
+			chengdan := totalMap[project.Name][company.Name][2]
+			chengdanTotal = chengdanTotal + chengdan
+			if company.Name == "累计" {
+				processFile.SetCellValue(summarySheet.SheetName, axis, chengdanTotal)
+				fmt.Printf("%v %v\n", axis, chengdanTotal)
+			} else {
+				if chengdan == 0 {
+					processFile.SetCellValue(summarySheet.SheetName, axis, "/")
+				} else {
+					processFile.SetCellValue(summarySheet.SheetName, axis, chengdan)
+				}
+				fmt.Printf("%v %v\n", axis, chengdan)
+			}
+		}
+	}
+}
+
 // env GOOS=windows GOARCH=amd64 go build -o excel.exe 编译windows可执行文件
 func main() {
 
@@ -283,15 +367,19 @@ func main() {
 		return
 	}
 
+	rowArray, err := processFile.GetRows(config.DetailSheetInfo.SheetName)
+	if err != nil {
+		fmt.Printf("GetRows error:%v\n", err)
+		return
+	}
+
 	summaryData := getTableData(processFile, config.SummarySheetInfo)
-	fmt.Printf("summaryData:%+v\n", summaryData)
+	fmt.Printf("\nsummaryData:%+v\n\n", summaryData)
 
-	// detailData := getTableData(processFile, config.DetailSheetInfo)
-	// fmt.Printf("detailData:%+v\n", detailData)
-
-	generateDateTable(processFile, config.DetailSheetInfo)
+	generateDateTable(processFile, config, rowArray)
+	generateSummaryTable(processFile, config, rowArray, summaryData)
 
 	processFile.Save()
-
+	processFile.Close()
 	return
 }
