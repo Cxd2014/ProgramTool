@@ -1,0 +1,23 @@
+{
+    "fileName": "test.xlsx",
+    "summarySheetInfo": {
+        "sheetName": "汇总表",
+        "dataRow": [3,22],
+        "项目": "A",
+        "代理商": "H",
+        "外呼量": "I",
+        "接通量": "K",
+        "成单量": "M"
+    },
+    "detailSheetInfo": {
+        "sheetName": "明细表",
+        "dataRow": [3],
+        "项目": "B",
+        "代理商": "D",
+        "外呼量": "F",
+        "接通量": "G",
+        "成单量": "I",
+        "任务名称":"C",
+        "日期": "A"
+    }
+}
