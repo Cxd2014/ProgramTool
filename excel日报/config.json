@@ -1,8 +1,9 @@
 {
-    "fileName": "test.xlsx",
+    "fileName": "16代理商外呼计划-1月12日计划.xlsx",
+    "date":"1月10日",
     "summarySheetInfo": {
-        "sheetName": "汇总表",
-        "dataRow": [3,22],
+        "sheetName": "1月汇总",
+        "dataRow": [3,26],
         "项目": "A",
         "代理商": "H",
         "外呼量": "I",
@@ -12,12 +13,13 @@
     "detailSheetInfo": {
         "sheetName": "明细表",
         "dataRow": [3],
+        "日期": "A",
         "项目": "B",
+        "任务名称":"C",
         "代理商": "D",
+        "主推业务":"E",
         "外呼量": "F",
         "接通量": "G",
-        "成单量": "I",
-        "任务名称":"C",
-        "日期": "A"
+        "成单量": "I"
     }
 }

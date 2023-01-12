@@ -36,6 +36,7 @@ type SheetInfo struct {
 	StrChengdan   string `json:"成单量"`
 	StrDate       string `json:"日期"`
 	StrRenwu      string `json:"任务名称"`
+	StrZhutuiyewu string `json:"主推业务"`
 
 	rowStart int
 	rowEnd   int
@@ -47,6 +48,7 @@ type SheetInfo struct {
 	chengdan   int
 	date       int
 	renwu      int
+	zhutuiyewu int
 }
 
 type FilterConfig struct {
@@ -90,6 +92,7 @@ func ReadConfigFile() (*FilterConfig, error) {
 	dsi.chengdan = titleToNumber(dsi.StrChengdan) - 1
 	dsi.renwu = titleToNumber(dsi.StrRenwu) - 1
 	dsi.date = titleToNumber(dsi.StrDate) - 1
+	dsi.zhutuiyewu = titleToNumber(dsi.StrZhutuiyewu) - 1
 
 	fmt.Printf("init config:%+v\n", config)
 	return config, nil
@@ -161,7 +164,9 @@ func generateDateTable(processFile *excelize.File, config *FilterConfig, rowArra
 	if config.Date == "" {
 		today = time.Now().Format("1月2日")
 	}
-	month := today[:4]
+
+	strings.Index(today, "月")
+	month := today[:strings.Index(today, "月")+len("月")]
 	fmt.Printf("month:%v today:%v %v %v\n", month, today, len(month), len(today))
 
 	todayRows := make([][]string, 0)
@@ -177,6 +182,8 @@ func generateDateTable(processFile *excelize.File, config *FilterConfig, rowArra
 		}
 	}
 
+	fmt.Printf("projectMap: %+v \ncompanyMap%+v\n", projectMap, companyMap)
+
 	projects := make([]string, 0, len(projectMap))
 	for p, _ := range projectMap {
 		projects = append(projects, p)
@@ -188,6 +195,8 @@ func generateDateTable(processFile *excelize.File, config *FilterConfig, rowArra
 		companys = append(companys, c)
 	}
 	sort.Strings(companys)
+
+	fmt.Printf("todayRows: %+v\n", todayRows)
 
 	sortRows := make([][]string, 0)
 	totalMap := make(map[string]map[string][4]int)
@@ -220,7 +229,7 @@ func generateDateTable(processFile *excelize.File, config *FilterConfig, rowArra
 	processFile.NewSheet(today)
 	processFile.MergeCell(today, "A1", "J1")
 	processFile.SetSheetRow(today, "A1", &[]interface{}{month + "排产计划-精准系统-" + today})
-	processFile.SetSheetRow(today, "A2", &[]interface{}{"项目", "当日外呼的任务名称", "任务包总量", "代理商", "主推的业务包名称", "当日外呼量", "当日接通量", "当日接通率", "当日成单量", "当日外呼成功率"})
+	processFile.SetSheetRow(today, "A2", &[]interface{}{"项目", "当日外呼的任务名称", "任务包总量", "代理商", "主推的业务包名称", "当日外呼量", "外呼量完成率", "当日接通量", "当日接通率", "当日成单量", "成单量完成率", "当日外呼成功率"})
 
 	mergeRow := 0
 	for i, row := range sortRows {
@@ -241,13 +250,15 @@ func generateDateTable(processFile *excelize.File, config *FilterConfig, rowArra
 				processFile.MergeCell(today, "H"+strCurrent, "H"+strMergeRow)
 				processFile.MergeCell(today, "I"+strCurrent, "I"+strMergeRow)
 				processFile.MergeCell(today, "J"+strCurrent, "J"+strMergeRow)
+				processFile.MergeCell(today, "K"+strCurrent, "K"+strMergeRow)
+				processFile.MergeCell(today, "L"+strCurrent, "L"+strMergeRow)
 				fmt.Printf("current:%v mergeRow:%v\n", current, mergeRow)
 			}
 		}
 
 		interRow := []interface{}{row[sheet.xiangmu], row[sheet.renwu], row[sheet.waihu],
-			row[sheet.dailishang], row[sheet.xiangmu], waihu, jietong,
-			fmt.Sprintf("%.2f%%\n", (float32(jietong)/float32(waihu))*100), chengdan,
+			row[sheet.dailishang], row[sheet.zhutuiyewu], waihu, "", jietong,
+			fmt.Sprintf("%.2f%%\n", (float32(jietong)/float32(waihu))*100), chengdan, "",
 			fmt.Sprintf("%.2f%%\n", (float32(chengdan)/float32(jietong))*100)}
 		err := processFile.SetSheetRow(today, axis, &interRow)
 		if err != nil {
@@ -352,8 +363,13 @@ func generateSummaryTable(processFile *excelize.File, config *FilterConfig, rowA
 	}
 }
 
-// env GOOS=windows GOARCH=amd64 go build -o excel.exe 编译windows可执行文件
+// env GOOS=windows GOARCH=amd64 go build -o 报表.exe 编译windows可执行文件
 func main() {
+
+	defer func() {
+		fmt.Printf("after 60s exit...\n")
+		time.Sleep(60 * time.Second)
+	}()
 
 	config, err := ReadConfigFile()
 	if err != nil {
@@ -370,6 +386,7 @@ func main() {
 	rowArray, err := processFile.GetRows(config.DetailSheetInfo.SheetName)
 	if err != nil {
 		fmt.Printf("GetRows error:%v\n", err)
+		processFile.Close()
 		return
 	}
 
