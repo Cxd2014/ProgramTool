@@ -1,15 +1,15 @@
 INCLUDE_PATH += -I/usr/local/include/SDL2/
 
-LIBRARY_PATH = /usr/local/lib/libavformat.a \
-			/usr/local/lib/libavcodec.a \
-			/usr/local/lib/libavdevice.a \
+LIBRARY_PATH = /usr/local/lib/libavdevice.a \
 			/usr/local/lib/libavfilter.a \
+			/usr/local/lib/libavformat.a \
+			/usr/local/lib/libavcodec.a \
 			/usr/local/lib/libavutil.a \
 			/usr/local/lib/libswresample.a \
 			/usr/local/lib/libswscale.a \
 			/usr/local/lib/libSDL2.a \
 
-LIB = -lswresample -lm -lz
+LIB = -lfontconfig -lfreetype -lexpat -lfribidi -lswresample -lm -lz 
 
 .PHONY: clean 
 
