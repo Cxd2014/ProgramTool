@@ -3,6 +3,7 @@
 #include <stdbool.h>
 
 #include <SDL.h>
+#include <SDL_ttf.h>
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libswscale/swscale.h>
@@ -15,6 +16,7 @@
 #include "rqueue.h"
 
 #define QUEUE_BUFF_LEN (8)
+#define FILTER_DESCR "drawtext=fontfile=/usr/share/fonts/truetype/freefont/FreeSerif.ttf:fontsize=60:text='alpha':x=w-text_w-20:y=20"
 
 typedef struct videoFrame {
     AVFrame *frame;
@@ -26,6 +28,7 @@ typedef struct playerState {
     SDL_Window *pWindow;
     SDL_Renderer *pRender;
     SDL_Texture *pTexture;
+    TTF_Font *pFont;
 
     AVFormatContext *pFormatCtx;
     AVCodecContext *pCodecCtx;
@@ -132,6 +135,17 @@ int init_sdl(playerState *ps) {
         return __LINE__;
     }
 
+    if (TTF_Init() < 0) {
+        printf("Couldn't initialize TTF: %s\n",SDL_GetError());
+        return __LINE__;
+    }
+
+    ps->pFont = TTF_OpenFont("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24);
+    if (ps->pFont == NULL) {
+        printf("Couldn't load pt font from %s\n", SDL_GetError());
+        return __LINE__;
+    }
+
     // 创建窗口
     ps->pWindow = SDL_CreateWindow(
             "video player",
@@ -150,6 +164,34 @@ int init_sdl(playerState *ps) {
         return __LINE__;
     }
 
+    return 0;
+}
+
+int show_frame_count(playerState *ps) {
+    
+    char str[12] = "";
+    sprintf(str, "%d", ps->renderFrameCount+1);
+    SDL_Color white = { 0xFF, 0xFF, 0xFF, 0 };
+    
+    SDL_Surface *text = TTF_RenderUTF8_Blended(ps->pFont, str, white);
+    if(text == NULL){
+        printf("TTF_RenderUTF8_Blended error\n");
+        return __LINE__;
+    }
+
+    SDL_Rect rect;
+    rect.x = 20;
+    rect.y = 20;
+    rect.w = text->w;
+    rect.h = text->h;
+    SDL_Texture* texture = SDL_CreateTextureFromSurface(ps->pRender, text);
+    if(texture == NULL){
+        printf("SDL_CreateTextureFromSurface error\n");
+        return __LINE__;
+    }
+
+    SDL_RenderCopy(ps->pRender, texture, NULL, &rect); // 将帧数纹理复制到渲染器
+    SDL_DestroyTexture(texture);
     return 0;
 }
 
@@ -207,9 +249,9 @@ int render_video_frame(playerState *ps, videoFrame *vFrame) {
                          pixels[1], linesize[1],
                          pixels[2], linesize[2]);
 
-
     SDL_RenderClear(ps->pRender); // 先清空渲染器
-    SDL_RenderCopy(ps->pRender, ps->pTexture, NULL, &rect); // 将纹理数据复制到渲染器
+    SDL_RenderCopy(ps->pRender, ps->pTexture, NULL, &rect); // 将视频纹理复制到渲染器
+    show_frame_count(ps); // 显示帧数
     SDL_RenderPresent(ps->pRender); // 渲染画面
 
     if (ps->isPause == false) {
@@ -418,6 +460,8 @@ void do_exit(playerState *ps) {
     if (ps->pImgConvertCtx)
         sws_freeContext(ps->pImgConvertCtx);
 
+    avfilter_graph_free(&ps->pfilterGraph);
+
     SDL_DestroyRenderer(ps->pRender);
     SDL_DestroyWindow(ps->pWindow);
 
@@ -472,6 +516,7 @@ void event_loop(playerState *ps) {
                             sws_freeContext(ps->pImgConvertCtx);
                             ps->pImgConvertCtx = NULL;
                         }
+
                         printf("window size changed width:%d height:%d\n",
                                     event.window.data1, event.window.data2);
                 }
@@ -516,6 +561,11 @@ int init_playerState(playerState *ps) {
     ps->pFormatCtx = NULL;
     ps->pCodecCtx = NULL;
     ps->pImgConvertCtx = NULL;
+    ps->pFont = NULL;
+
+    ps->pfilterGraph = NULL;
+    ps->pBuffersinkCtx = NULL;
+    ps->pBuffersrcCtx = NULL;
 
     ps->readThread = NULL;
 
@@ -548,6 +598,7 @@ int init_playerState(playerState *ps) {
     return 0;
 }
 
+// av_seek_frame 
 int main(int argc, char *argv[]) {
 
     playerState ps;
@@ -571,8 +622,7 @@ int main(int argc, char *argv[]) {
         return __LINE__;
     }
 
-    const char *filter_descr = "drawtext=fontsize=60:text='hello world':x=(w-text_w)/2:y=(h-text_h)/2";
-    if (init_filters(&ps, filter_descr) != 0) {
+    if (init_filters(&ps, FILTER_DESCR) != 0) {
         printf("init_filters error\n");
         return __LINE__;
     }
