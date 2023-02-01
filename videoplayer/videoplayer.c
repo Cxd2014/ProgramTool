@@ -41,6 +41,7 @@ typedef struct playerState {
     SDL_Thread *readThread;
     rqueue_t *pQueue;
 
+    int seekPoint;
     int videoIndex;
     int windowWidth;
     int windowHeight;
@@ -167,10 +168,11 @@ int init_sdl(playerState *ps) {
     return 0;
 }
 
-int show_frame_count(playerState *ps) {
+int show_time(playerState *ps, AVFrame *frame) {
     
     char str[12] = "";
-    sprintf(str, "%d", ps->renderFrameCount+1);
+
+    sprintf(str, "%1.0f/%ld", (frame->pts * av_q2d(ps->pFormatCtx->streams[ps->videoIndex]->time_base)), (ps->pFormatCtx->duration/AV_TIME_BASE));
     SDL_Color white = { 0xFF, 0xFF, 0xFF, 0 };
     
     SDL_Surface *text = TTF_RenderUTF8_Blended(ps->pFont, str, white);
@@ -192,6 +194,29 @@ int show_frame_count(playerState *ps) {
 
     SDL_RenderCopy(ps->pRender, texture, NULL, &rect); // 将帧数纹理复制到渲染器
     SDL_DestroyTexture(texture);
+    return 0;
+}
+
+int show_slidbar(playerState *ps, AVFrame *frame) {
+
+    SDL_Rect rect;
+    rect.x = 0;
+    rect.y = ps->windowHeight-10;
+    rect.w = ps->windowWidth;
+    rect.h = 10;
+
+    SDL_Color bg_color = {255, 255, 255, 255};
+    SDL_SetRenderDrawColor(ps->pRender, bg_color.r, bg_color.g, bg_color.b, bg_color.a);
+    SDL_RenderFillRect(ps->pRender, &rect);
+
+    SDL_Color board_color = {0, 0, 0, 255};
+    SDL_SetRenderDrawColor(ps->pRender, board_color.r, board_color.g, board_color.b, board_color.a);
+    SDL_RenderDrawRect(ps->pRender, &rect);
+
+    rect.w = (frame->pts * av_q2d(ps->pFormatCtx->streams[ps->videoIndex]->time_base)) / (ps->pFormatCtx->duration/AV_TIME_BASE) * (ps->windowWidth);
+    SDL_Color button_color = {50, 50, 50, 255};
+    SDL_SetRenderDrawColor(ps->pRender, button_color.r, button_color.g, button_color.b, button_color.a);
+    SDL_RenderFillRect(ps->pRender, &rect);
     return 0;
 }
 
@@ -251,7 +276,9 @@ int render_video_frame(playerState *ps, videoFrame *vFrame) {
 
     SDL_RenderClear(ps->pRender); // 先清空渲染器
     SDL_RenderCopy(ps->pRender, ps->pTexture, NULL, &rect); // 将视频纹理复制到渲染器
-    show_frame_count(ps); // 显示帧数
+    show_time(ps, frame); // 显示播放时间
+    show_slidbar(ps, frame); // 展示进度条
+
     SDL_RenderPresent(ps->pRender); // 渲染画面
 
     if (ps->isPause == false) {
@@ -363,6 +390,17 @@ int do_read_video(void *arg) {
     int queueIndex = 0;
 
     while (ps->isQuit == false) {
+
+        if (ps->seekPoint != 0) {
+            if (av_seek_frame(ps->pFormatCtx, ps->videoIndex, ps->seekPoint, AVSEEK_FLAG_ANY | AVSEEK_FLAG_BACKWARD) < 0) {
+                printf("av_seek_frame error\n");
+            }
+
+            avcodec_flush_buffers(ps->pCodecCtx);
+            ps->seekPoint = 0;
+            readEnd = false;
+        }
+
         // av_read_frame 从文件中读取一帧未解码的数据
         if (av_read_frame(ps->pFormatCtx, packet) >= 0) {
             // 如果是视频数据
@@ -388,6 +426,8 @@ int do_read_video(void *arg) {
         // 从解码器中循环读取帧数据,直到读取失败
         while (avcodec_receive_frame(ps->pCodecCtx, frame) >= 0) {
 
+            //printf("best_effort_timestamp:%ld pkt_pos:%ld pkt_duration:%ld\n", 
+            //    frame->best_effort_timestamp, frame->pkt_pos, frame->pkt_duration);
             // 再把帧放到 filter 中，添加文字水印
             frame->pts = frame->best_effort_timestamp;
             if (av_buffersrc_add_frame_flags(ps->pBuffersrcCtx, frame, AV_BUFFERSRC_FLAG_KEEP_REF) < 0) {
@@ -426,7 +466,7 @@ int do_read_video(void *arg) {
         }
 
         if (readEnd) {
-            break;
+            SDL_Delay(50);
         }
     }
 
@@ -488,20 +528,38 @@ void event_loop(playerState *ps) {
         if (SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_FIRSTEVENT, SDL_LASTEVENT) != 0) {
             switch (event.type) {
             case SDL_KEYDOWN:
-                 switch (event.key.keysym.sym) {
-                    case SDLK_SPACE:
-                        ps->isPause = !(ps->isPause); // 暂停，开启播放
-                        ps->isNext = false;
-                        printf("space key kickdown isPause:%d\n", ps->isPause);
-                        break;
-                    case SDLK_RIGHT:
-                        if (ps->isPause) {
-                            ps->isNext = true; // 暂停状态下才能逐帧播放
-                            printf("right key kickdown isNext:%d\n", ps->isNext);
-                        }
-                        break;
-                 }
-                 break;
+                switch (event.key.keysym.sym) {
+                case SDLK_SPACE:
+                    ps->isPause = !(ps->isPause); // 暂停，开启播放
+                    ps->isNext = false;
+                    printf("space key kickdown isPause:%d\n", ps->isPause);
+                    break;
+                case SDLK_RIGHT:
+                    if (ps->isPause) {
+                        ps->isNext = true; // 暂停状态下才能逐帧播放
+                        printf("right key kickdown isNext:%d\n", ps->isNext);
+                    }
+                    break;
+                }
+                break;
+            case SDL_MOUSEBUTTONDOWN:
+
+                SDL_Rect rect;
+                rect.x = 0;
+                rect.y = ps->windowHeight-50;
+                rect.w = ps->windowWidth;
+                rect.h = 50;
+
+                SDL_Point pot;
+                pot.x = event.motion.x;
+                pot.y = event.motion.y;
+
+                if (SDL_PointInRect(&pot, &rect) && ps->seekPoint == 0) {
+                    ps->seekPoint = (pot.x * ps->pFormatCtx->duration) / (ps->windowWidth*AV_TIME_BASE*av_q2d(ps->pFormatCtx->streams[ps->videoIndex]->time_base));
+                    printf("x:%d y:%d seekPoint:%d\n", pot.x, pot.y, ps->seekPoint);
+                }
+
+                break;
             case SDL_WINDOWEVENT:
                 switch (event.window.event) {
                     case SDL_WINDOWEVENT_SIZE_CHANGED:
@@ -569,6 +627,7 @@ int init_playerState(playerState *ps) {
 
     ps->readThread = NULL;
 
+    ps->seekPoint = 0;
     ps->videoIndex = 0;
     ps->windowWidth = 1080; // 默认窗口大小
     ps->windowHeight = 720;
