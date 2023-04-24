@@ -8,4 +8,6 @@
   老婆提的需求，提取明细数据生成每日报表。
 * videoplayer
   使用 SDL + ffmpeg 实现的 视频播放器 ，目前可以做到播放视频，视频暂停功能，还在完善中，主要是想学习一下音视频处理。
+  * http_proxy
+    基于libevent实现的http代理
 
