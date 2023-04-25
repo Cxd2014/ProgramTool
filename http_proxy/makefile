@@ -3,7 +3,7 @@ INCLUDE_PATH += -I/usr/local/include/
 
 LIBRARY_PATH = /usr/local/lib/libevent.a \
 
-#LIB = -lfontconfig -lfreetype -lexpat -lfribidi -lm -lz 
+LIB = -lpthread
 
 .PHONY: clean 
 

@@ -9,6 +9,7 @@ extern "C" {
 #include <stdio.h>
 #include <arpa/inet.h>
 #include <time.h>
+#include <pthread.h>
 
 #include <event2/event.h>
 #include <event2/http.h>
@@ -34,6 +35,7 @@ class LibeventContext
         string ip;
         int port;
         int verbose;
+		pthread_t tid;
         struct event_base *base;
         struct evdns_base *dnsbase;
         struct evhttp *http;
@@ -84,10 +86,13 @@ class LibeventContext
         struct evhttp *Gethttp() {
             return http;
         }
+		pthread_t *GetTid() {
+            return &tid;
+        }
 
         int ParseOpts(int argc, char **argv);
         int InitLibevent();
-        void RegisterHttpHandler();
+		void RegisterHttpHandler();
 };
 
 LibeventContext LibeventCtx;
@@ -95,6 +100,7 @@ LibeventContext::LibeventContext()
 {
     ip = "";
     port = 0;
+	tid = 0;
     base = NULL;
     dnsbase = NULL;
     http = NULL;
@@ -104,13 +110,15 @@ LibeventContext::LibeventContext()
 
 LibeventContext::~LibeventContext()
 {
-    if (http)
-        evhttp_free(http);
     if (dnsbase)
         evdns_base_free(dnsbase, 1);
+
+	if (http)
+        evhttp_free(http);
+
     if (base)
 		event_base_free(base);
-    
+
     cout << "~LibeventContext" << endl;
 }
 
@@ -152,13 +160,6 @@ static int display_listen_sock(struct evhttp_bound_socket *handle)
 	}
 
 	return 0;
-}
-
-static void do_term(int sig, short events, void *arg)
-{
-	struct event_base *base = (struct event_base *)arg;
-	event_base_loopexit(base, NULL);
-	printf("Got %i, Terminating\n", sig);
 }
 
 static void timer_callback(evutil_socket_t fd, short what, void *arg)
@@ -217,17 +218,6 @@ int LibeventContext::InitLibevent()
 		return -5;
 	}
 
-	struct event *term = evsignal_new(base, SIGINT, do_term, base);
-	if (!term) {
-        cout << "evsignal_new error\n" ;
-		return -6;
-    }
-		
-	if (event_add(term, NULL)) {
-        cout << "evsignal_new error\n" ;
-		return -6;
-    }
-
     // 初始化 定时器
     struct timeval tv = {CACHE_TIME-1, 0};
     struct event *ev = event_new(base, -1, EV_PERSIST, timer_callback, NULL);
@@ -283,7 +273,6 @@ close_on_finished_writecb(struct bufferevent *bev, void *ctx)
 	}
 }
 
-
 static void
 eventcb(struct bufferevent *bev, short what, void *ctx)
 {
@@ -315,21 +304,13 @@ eventcb(struct bufferevent *bev, short what, void *ctx)
 		}
 
 		if (partner) {
-			/* Flush all pending data */
 			readcb(bev, ctx);
 
-			if (evbuffer_get_length(
-				    bufferevent_get_output(partner))) {
-				/* We still have to flush data from the other
-				 * side, but when that's done, close the other
-				 * side. */
-				bufferevent_setcb(partner,
-				    NULL, close_on_finished_writecb,
+			if (evbuffer_get_length(bufferevent_get_output(partner))) {
+				bufferevent_setcb(partner, NULL, close_on_finished_writecb,
 				    eventcb, NULL);
 				bufferevent_disable(partner, EV_READ);
 			} else {
-				/* We have nothing left to say to the other
-				 * side; close it. */
 				bufferevent_free(partner);
 			}
 		}
@@ -441,6 +422,7 @@ static void create_http_proxy(const string ip, struct evhttp_request *client_req
 	// 新连接
     struct bufferevent *b_proxy = bufferevent_socket_new(
 			LibeventCtx.GetEventBase(), -1, BEV_OPT_CLOSE_ON_FREE);
+
     struct evhttp_connection *proxy_conn = evhttp_connection_base_bufferevent_new(
 			LibeventCtx.GetEventBase(), NULL, b_proxy, ip.c_str(), port);
     if (proxy_conn == NULL) {
@@ -524,6 +506,7 @@ static void proxy_request_cb(struct evhttp_request *req, void *arg)
 
 static void exit_request_cb(struct evhttp_request *req, void *arg)
 {
+	evhttp_send_reply(req, 200, "OK", NULL);
 	event_base_loopexit(LibeventCtx.GetEventBase(), NULL);
 	printf("exit_request_cb...\n");
 }
@@ -538,23 +521,45 @@ void LibeventContext::RegisterHttpHandler()
     cout << "RegisterHttpHandler" << endl;
 }
 
-int main(int argc, char **argv)
+void *RunHttpProxy(void *args)
 {
-    int ret = 0;
+	cout << "http_proxy thread start!" << endl;
+    event_base_dispatch(LibeventCtx.GetEventBase());
+	cout << "http_proxy thread exit!" << endl;
+	pthread_exit(NULL);
+}
+
+int InitProxy(int argc, char **argv)
+{
+	int ret = 0;
     ret = LibeventCtx.ParseOpts(argc, argv);
     if (ret != 0) {
-        cout << "ParseOpts error!" << endl;
+        cout << "ParseOpts error:" << ret << endl;
         return ret;
     }
 
     ret = LibeventCtx.InitLibevent();
     if (ret != 0) {
-        cout << "InitLibevent error!" << endl;
+        cout << "InitLibevent error:" << ret << endl;
         return ret;
     }
 
     LibeventCtx.RegisterHttpHandler();
-    event_base_dispatch(LibeventCtx.GetEventBase());
-	cout << "http_proxy exit!" << endl;
+
+	ret = pthread_create(LibeventCtx.GetTid(), NULL, RunHttpProxy, NULL);
+	if (ret != 0) {
+		cout << "pthread_create error:" << ret << endl;
+		return ret;
+	}
+
+	return 0;
+}
+
+int main(int argc, char **argv)
+{
+    InitProxy(argc, argv);
+	cout << "main pthread_join" << endl;
+	pthread_join(*(LibeventCtx.GetTid()), NULL);	
+	cout << "main exit!" << endl;
 	exit(0);
 }
