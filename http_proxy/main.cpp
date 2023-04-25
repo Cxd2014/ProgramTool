@@ -8,13 +8,7 @@ extern "C" {
 #include <string.h>
 #include <stdio.h>
 #include <arpa/inet.h>
-// #include <sys/types.h>
-// #include <sys/stat.h>
-// #include <sys/stat.h>
-// #include <sys/socket.h>
-// #include <fcntl.h>
-// #include <unistd.h>
-// #include <dirent.h>
+#include <time.h>
 
 #include <event2/event.h>
 #include <event2/http.h>
@@ -28,6 +22,12 @@ extern "C" {
 
 using namespace std;
 
+struct CacheDns {
+    string ip;
+    time_t cache_time;
+};
+
+#define CACHE_TIME (600)
 class LibeventContext
 {
     private:
@@ -37,11 +37,43 @@ class LibeventContext
         struct event_base *base;
         struct evdns_base *dnsbase;
         struct evhttp *http;
+        map<string, CacheDns> dns_cache;
 
     public:
-        map<struct evhttp_request *, struct evhttp_request *> mapConn;
         LibeventContext();
         ~LibeventContext();
+
+        void InsertDns(string host, string ip) {
+            CacheDns dns;
+            dns.ip = ip;
+            time(&dns.cache_time);
+            dns_cache[host] = dns;
+        }
+        string GetDns(string host) {
+            auto iter = dns_cache.find(host);
+            if (iter != dns_cache.end()) {
+                time_t now; time(&now);
+                if (now - iter->second.cache_time < CACHE_TIME) {
+                    return iter->second.ip;
+                }
+            }
+            return "";
+        }
+        void CleanDns() {
+            time_t now; time(&now);
+            cout << "begin clean dns cache:" << dns_cache.size() << endl;
+            for (auto iter = dns_cache.begin(); iter != dns_cache.end();) {
+                if (now - iter->second.cache_time > CACHE_TIME) {
+                    cout << "cache time out " << "host:" << iter->first 
+                        << " cache time:" << iter->second.cache_time 
+                        << " now time:" << now << endl;
+                    iter = dns_cache.erase(iter);
+                } else {
+                    iter ++;
+                }
+            }
+            cout << "end clean dns cache:" << dns_cache.size() << endl;
+        }
 
         struct event_base *GetEventBase() {
             return base;
@@ -56,7 +88,6 @@ class LibeventContext
         int ParseOpts(int argc, char **argv);
         int InitLibevent();
         void RegisterHttpHandler();
-
 };
 
 LibeventContext LibeventCtx;
@@ -131,6 +162,11 @@ static void do_term(int sig, short events, void *arg)
 	fprintf(stderr, "Got %i, Terminating\n", sig);
 }
 
+static void timer_callback(evutil_socket_t fd, short what, void *arg)
+{
+    LibeventCtx.CleanDns();
+}
+
 int LibeventContext::InitLibevent()
 {
 
@@ -193,7 +229,11 @@ int LibeventContext::InitLibevent()
 		return -6;
     }
 
-    RegisterHttpHandler();
+    // 初始化 定时器
+    struct timeval tv = {60, 0};
+    struct event *ev = event_new(base, -1, EV_PERSIST, timer_callback, NULL);
+    event_add(ev, &tv);
+
     return ret;
 }
 
@@ -231,7 +271,7 @@ readcb(struct bufferevent *bev, void *ctx)
 		return;
 	}
 	dst = bufferevent_get_output(partner);
-	evbuffer_add_buffer(dst, src);
+    evbuffer_add_buffer(dst, src);
 }
 
 static void
@@ -249,7 +289,7 @@ static void
 eventcb(struct bufferevent *bev, short what, void *ctx)
 {
 	struct bufferevent *partner = (struct bufferevent *)ctx;
-	printf("eventcb, what:%d ", what);
+	printf("eventcb, what:%d partner:%p", what, partner);
 	if ((what & BEV_EVENT_READING) == BEV_EVENT_READING) {
 		printf(" BEV_EVENT_READING");
 	}
@@ -268,7 +308,6 @@ eventcb(struct bufferevent *bev, short what, void *ctx)
 	if ((what & BEV_EVENT_CONNECTED) == BEV_EVENT_CONNECTED) {
 		printf(" BEV_EVENT_CONNECTED");
 	}
-	printf("\n");
 
 	if (what & (BEV_EVENT_EOF|BEV_EVENT_ERROR)) {
 		if (what & BEV_EVENT_ERROR) {
@@ -296,7 +335,9 @@ eventcb(struct bufferevent *bev, short what, void *ctx)
 			}
 		}
 		bufferevent_free(bev);
+        printf(" bufferevent_free");
 	}
+    printf("\n");
 }
 
 void get_addr(int result, char type, int count, int ttl,
@@ -311,52 +352,11 @@ void get_addr(int result, char type, int count, int ttl,
 
 	if (type == DNS_IPv4_A) {
 		inet_ntop(AF_INET, &((ev_uint32_t*)addrs)[0], buf, buf_size);
-		printf("DNS_IPv4_A %s: %s ttl:%d\n", evhttp_request_get_host(req), buf, ttl);
+		printf("DNS_IPv4_A %s:%s ttl:%d\n", evhttp_request_get_host(req), buf, ttl);
 	} else if (type == DNS_PTR) {
 		snprintf(buf, buf_size, "%s", ((char**)addrs)[0]);
 		printf("DNS_PTR %s: %s ttl:%d\n", evhttp_request_get_host(req), ((char**)addrs)[0], ttl);
 	}
-}
-
-static void
-https_dns_callback(int result, char type, int count, int ttl,
-			  void *addrs, void *orig) {
-
-	struct evhttp_request *req = (struct evhttp_request *)orig;
-	static struct sockaddr_storage connect_to_addr;
-	static int connect_to_addrlen = sizeof(connect_to_addr);
-
-    char buf[32] = {0};
-    get_addr(result, type, count, ttl, addrs, orig, buf, sizeof(buf));
-    int port = evhttp_uri_get_port(evhttp_request_get_evhttp_uri(req));
-    if (port == -1)
-        port = 443;
-    string addr = buf + string(":") + to_string(port);
-
-	// 建立连接
-	struct bufferevent *b_out = bufferevent_socket_new(LibeventCtx.GetEventBase(), -1,
-		BEV_OPT_CLOSE_ON_FREE|BEV_OPT_DEFER_CALLBACKS);
-
-	if (evutil_parse_sockaddr_port(addr.c_str(),
-		(struct sockaddr*)&connect_to_addr, &connect_to_addrlen)<0)
-		printf("evutil_parse_sockaddr_port error\n");
-
-	if (bufferevent_socket_connect(b_out,
-		(struct sockaddr*)&connect_to_addr, connect_to_addrlen)<0) {
-		perror("bufferevent_socket_connect");
-		bufferevent_free(b_out);
-		return;
-	}
-
-	struct evhttp_connection *evcon = evhttp_request_get_connection(req);
-	bufferevent_setcb(b_out, readcb, NULL, eventcb, evhttp_connection_get_bufferevent(evcon));
-	bufferevent_enable(b_out, EV_READ|EV_WRITE);
-
-	// CONNECT请求回包
-	evhttp_send_reply(req, 200, "Connection Established", NULL);
-
-	// 修改此连接的读写回调函数
-	bufferevent_setcb(evhttp_connection_get_bufferevent(evcon),readcb,NULL,eventcb,b_out);
 }
 
 void http_header_copy(struct evhttp_request *from_req, struct evhttp_request *to_req)
@@ -398,16 +398,38 @@ http_request_done(struct evhttp_request *req, void *ctx)
 
 }
 
-static void
-http_dns_callback(int result, char type, int count, int ttl,
-			  void *addrs, void *orig) {
-
-	struct evhttp_request *req = (struct evhttp_request *)orig;
-	static struct sockaddr_storage connect_to_addr;
+static void create_https_proxy(const char *buf, struct evhttp_request *req)
+{
+    static struct sockaddr_storage connect_to_addr;
 	static int connect_to_addrlen = sizeof(connect_to_addr);
+    // 建立连接
+	struct bufferevent *b_out = bufferevent_socket_new(LibeventCtx.GetEventBase(), -1,
+		BEV_OPT_CLOSE_ON_FREE|BEV_OPT_DEFER_CALLBACKS);
 
-	char buf[32] = {0};
-    get_addr(result, type, count, ttl, addrs, orig, buf, sizeof(buf));
+	if (evutil_parse_sockaddr_port(buf,
+		(struct sockaddr*)&connect_to_addr, &connect_to_addrlen)<0)
+		printf("evutil_parse_sockaddr_port error\n");
+
+	if (bufferevent_socket_connect(b_out,
+		(struct sockaddr*)&connect_to_addr, connect_to_addrlen)<0) {
+		perror("bufferevent_socket_connect");
+		bufferevent_free(b_out);
+		return;
+	}
+
+	struct evhttp_connection *evcon = evhttp_request_get_connection(req);
+	bufferevent_setcb(b_out, readcb, NULL, eventcb, evhttp_connection_get_bufferevent(evcon));
+	bufferevent_enable(b_out, EV_READ|EV_WRITE);
+
+	// CONNECT请求回包
+	evhttp_send_reply(req, 200, "Connection Established", NULL);
+
+	// 修改此连接的读写回调函数
+	bufferevent_setcb(evhttp_connection_get_bufferevent(evcon),readcb,NULL,eventcb,b_out);
+}
+
+static void create_http_proxy(const char *buf, struct evhttp_request *req)
+{
     int port = evhttp_uri_get_port(evhttp_request_get_evhttp_uri(req));
     if (port == -1)
         port = 80;
@@ -424,8 +446,6 @@ http_dns_callback(int result, char type, int count, int ttl,
     if (new_req == NULL) {
         fprintf(stderr, "evhttp_request_new() failed\n");
     }
-
-    LibeventCtx.mapConn[req] = new_req;
     
     // 复制请求头
     http_header_copy(req, new_req);
@@ -435,6 +455,27 @@ http_dns_callback(int result, char type, int count, int ttl,
     if (evhttp_make_request(new_conn, new_req, evhttp_request_get_command(req), evhttp_request_get_uri(req)) != 0) {
         fprintf(stderr, "evhttp_make_request() failed\n");
 	}
+}
+
+static void
+dns_callback(int result, char type, int count, int ttl,
+			  void *addrs, void *orig) {
+
+	struct evhttp_request *req = (struct evhttp_request *)orig;
+	char buf[32] = {0};
+    get_addr(result, type, count, ttl, addrs, orig, buf, sizeof(buf));
+    LibeventCtx.InsertDns(evhttp_request_get_host(req), string(buf));
+
+    if (evhttp_request_get_command(req) == EVHTTP_REQ_CONNECT) {
+        int port = evhttp_uri_get_port(evhttp_request_get_evhttp_uri(req));
+        if (port == -1)
+            port = 443;
+
+        string addr = buf + string(":") + to_string(port);
+        create_https_proxy(addr.c_str(), req);
+    } else {
+        create_http_proxy(buf, req);
+    }
 }
 
 static void proxy_request_cb(struct evhttp_request *req, void *arg)
@@ -456,28 +497,28 @@ static void proxy_request_cb(struct evhttp_request *req, void *arg)
 	printf("Received a %s request for %s host:%s port:%d \n",
 	    cmdtype, evhttp_request_get_uri(req), evhttp_request_get_host(req), evhttp_uri_get_port(evhttp_request_get_evhttp_uri(req)));
 
-	
-    // 处理 https 请求
-	if (evhttp_request_get_command(req) == EVHTTP_REQ_CONNECT) {
-		// 异步域名解析
-		evdns_base_resolve_ipv4(LibeventCtx.GetEvdnsBase(), evhttp_request_get_host(req), 0, https_dns_callback, req);
-		return;
-	}
+    string ip = LibeventCtx.GetDns(evhttp_request_get_host(req));
+    if (!ip.empty()) {
+        printf("get dns cache %s:%s\n", evhttp_request_get_host(req), ip.c_str());
+        if (evhttp_request_get_command(req) == EVHTTP_REQ_CONNECT) {
+            int port = evhttp_uri_get_port(evhttp_request_get_evhttp_uri(req));
+            if (port == -1)
+                port = 443;
 
-    // 处理 http 请求
-    auto iter = LibeventCtx.mapConn.find(req);
-    if (iter != LibeventCtx.mapConn.end()) {
-        printf("!!!!!!!connection reuse!!!!!!!!!\n");
+            string addr = ip + string(":") + to_string(port);
+            create_https_proxy(addr.c_str(), req);
+        } else {
+            create_http_proxy(ip.c_str(), req);
+        }
+    } else {
+        // 异步域名解析
+        evdns_base_resolve_ipv4(LibeventCtx.GetEvdnsBase(), evhttp_request_get_host(req), 0, dns_callback, req);
     }
-
-    // 异步域名解析
-    evdns_base_resolve_ipv4(LibeventCtx.GetEvdnsBase(), evhttp_request_get_host(req), 0, http_dns_callback, req);
-    
 }
 
 void LibeventContext::RegisterHttpHandler()
 {
-    // 设置默认处理函数
+    // 设置HTTP请求默认处理函数
     evhttp_set_gencb(http, proxy_request_cb, NULL);
 
     cout << "RegisterHttpHandler" << endl;
@@ -498,6 +539,7 @@ int main(int argc, char **argv)
         return ret;
     }
 
+    LibeventCtx.RegisterHttpHandler();
     event_base_dispatch(LibeventCtx.GetEventBase());
     return ret;
 }
