@@ -1,7 +1,7 @@
 
 INCLUDE_PATH += -I/usr/local/include/
 
-LIBRARY_PATH = /usr/local/lib/libevent.a \
+LIBRARY_PATH = /usr/local/lib/libevent.a
 
 LIB = -lpthread
 

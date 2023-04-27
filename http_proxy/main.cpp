@@ -28,7 +28,13 @@ struct CacheDns {
     time_t cache_time;
 };
 
+enum HEADER_COPY_TYPE {
+	CLIENT_TO_PROXY = 1,
+	PROXY_TO_CLIENT
+};
+
 #define CACHE_TIME (600)
+
 class LibeventContext
 {
     private:
@@ -38,12 +44,27 @@ class LibeventContext
 		pthread_t tid;
         struct event_base *base;
         struct evdns_base *dnsbase;
+		struct event *evtimer;
         struct evhttp *http;
         map<string, CacheDns> dns_cache;
+		map<struct bufferevent *, struct evhttp_connection *> map_conn;
 
     public:
         LibeventContext();
         ~LibeventContext();
+
+		void AddConn(struct bufferevent *bufev, struct evhttp_connection *conn) {
+            map_conn[bufev] = conn;
+        }
+		bool FreeConn(struct bufferevent *bufev) {
+            auto iter = map_conn.find(bufev);
+			if (iter != map_conn.end()) {
+				evhttp_connection_free(iter->second);
+				map_conn.erase(iter);
+				return true;
+			}
+			return false;
+        }
 
         void InsertDns(string host, string ip) {
             CacheDns dns;
@@ -92,6 +113,7 @@ class LibeventContext
 
         int ParseOpts(int argc, char **argv);
         int InitLibevent();
+		int UninitLibevent();
 		void RegisterHttpHandler();
 };
 
@@ -101,25 +123,43 @@ LibeventContext::LibeventContext()
     ip = "";
     port = 0;
 	tid = 0;
+	verbose = 0;
     base = NULL;
     dnsbase = NULL;
     http = NULL;
-
+	evtimer = NULL; 
     cout << "LibeventContext" << endl;
+}
+
+int LibeventContext::UninitLibevent()
+{
+	if (evtimer) {
+		event_free(evtimer);
+		evtimer = NULL; 
+	}
+
+    if (dnsbase) {
+        evdns_base_free(dnsbase, 1);
+		dnsbase = NULL;
+	}
+
+	if (http) {
+        evhttp_free(http);
+		http = NULL;
+	}
+
+    if (base) {
+		event_base_free(base);
+		base = NULL;
+	}
+
+    cout << "UninitLibevent" << endl;
+	return 0;
 }
 
 LibeventContext::~LibeventContext()
 {
-    if (dnsbase)
-        evdns_base_free(dnsbase, 1);
 
-	if (http)
-        evhttp_free(http);
-
-    if (base)
-		event_base_free(base);
-
-    cout << "~LibeventContext" << endl;
 }
 
 static int display_listen_sock(struct evhttp_bound_socket *handle)
@@ -220,8 +260,8 @@ int LibeventContext::InitLibevent()
 
     // 初始化 定时器
     struct timeval tv = {CACHE_TIME-1, 0};
-    struct event *ev = event_new(base, -1, EV_PERSIST, timer_callback, NULL);
-    event_add(ev, &tv);
+    evtimer = event_new(base, -1, EV_PERSIST, timer_callback, NULL);
+    event_add(evtimer, &tv);
 
     return ret;
 }
@@ -264,16 +304,6 @@ readcb(struct bufferevent *bev, void *ctx)
 }
 
 static void
-close_on_finished_writecb(struct bufferevent *bev, void *ctx)
-{
-	struct evbuffer *b = bufferevent_get_output(bev);
-	printf("close_on_finished_writecb\n");
-	if (evbuffer_get_length(b) == 0) {
-		bufferevent_free(bev);
-	}
-}
-
-static void
 eventcb(struct bufferevent *bev, short what, void *ctx)
 {
 	struct bufferevent *partner = (struct bufferevent *)ctx;
@@ -299,23 +329,26 @@ eventcb(struct bufferevent *bev, short what, void *ctx)
 
 	if (what & (BEV_EVENT_EOF|BEV_EVENT_ERROR)) {
 		if (what & BEV_EVENT_ERROR) {
-			if (errno)
+			if (errno) {
 				perror("connection error");
+			}
 		}
 
 		if (partner) {
-			readcb(bev, ctx);
-
-			if (evbuffer_get_length(bufferevent_get_output(partner))) {
-				bufferevent_setcb(partner, NULL, close_on_finished_writecb,
-				    eventcb, NULL);
-				bufferevent_disable(partner, EV_READ);
+			if (LibeventCtx.FreeConn(partner)) {
+				 printf(" evhttp_connection_free");
 			} else {
 				bufferevent_free(partner);
+				printf(" bufferevent_free");
 			}
 		}
-		bufferevent_free(bev);
-        printf(" bufferevent_free");
+
+		if (LibeventCtx.FreeConn(bev)) {
+			printf(" evhttp_connection_free");
+		} else {
+			bufferevent_free(bev);
+			printf(" bufferevent_free");
+		}
 	}
     printf("\n");
 }
@@ -339,7 +372,8 @@ string get_addr(int result, char type, int count, int ttl,
 	return string(buf);
 }
 
-void http_header_copy(struct evhttp_request *to_req, struct evhttp_request *from_req)
+void http_header_copy(struct evhttp_request *from_req, struct evhttp_request *to_req,
+	enum HEADER_COPY_TYPE copy_tpe)
 {
     struct evkeyval *header;
     struct evkeyvalq *headers = evhttp_request_get_input_headers(from_req);
@@ -347,10 +381,24 @@ void http_header_copy(struct evhttp_request *to_req, struct evhttp_request *from
 
     for (header = headers->tqh_first; header; header = header->next.tqe_next) {
         string str_key = string(header->key);
-        printf("%s: %s\n", header->key, header->value);
 		evhttp_add_header(output_headers, header->key, header->value);
 	}
-    evhttp_add_header(output_headers, "Proxy-Connection", "keep-alive");
+
+	if (copy_tpe == CLIENT_TO_PROXY) {
+		evhttp_add_header(output_headers, "Connection", "keep-alive");
+		evhttp_remove_header(output_headers, "Proxy-Connection");
+	}
+
+	if (copy_tpe == PROXY_TO_CLIENT) {
+		evhttp_remove_header(output_headers, "Connection");
+    	evhttp_add_header(output_headers, "Proxy-Connection", "keep-alive");
+	}
+
+	for (header = output_headers->tqh_first; header; header = header->next.tqe_next) {
+        string str_key = string(header->key);
+        printf("%s: %s\n", header->key, header->value);
+	}
+
     printf("\r\n");
 }
 
@@ -368,7 +416,7 @@ http_request_done(struct evhttp_request *proxy_req, void *ctx)
 	    evhttp_request_get_response_code(proxy_req),
 	    evhttp_request_get_response_code_line(proxy_req));
 
-	http_header_copy(client_req, proxy_req);
+	http_header_copy(proxy_req, client_req, PROXY_TO_CLIENT);
 
 	evhttp_send_reply(client_req, 
 		evhttp_request_get_response_code(proxy_req), 
@@ -400,17 +448,26 @@ static void create_https_proxy(const string ip, struct evhttp_request *client_re
 		return;
 	}
 
-	struct evhttp_connection *evcon = evhttp_request_get_connection(client_req);
-	struct bufferevent *b_client = evhttp_connection_get_bufferevent(evcon);
+	struct evhttp_connection *client_conn = evhttp_request_get_connection(client_req);
+	struct bufferevent *client_bufev = evhttp_connection_get_bufferevent(client_conn);
 
-	bufferevent_setcb(b_proxy, readcb, NULL, eventcb, b_client);
+	bufferevent_setcb(b_proxy, readcb, NULL, eventcb, client_bufev);
 	bufferevent_enable(b_proxy, EV_READ|EV_WRITE);
 
 	// CONNECT请求回包
 	evhttp_send_reply(client_req, 200, "Connection Established", NULL);
 
+	LibeventCtx.AddConn(client_bufev, client_conn);
 	// 修改client连接的读写回调函数
-	bufferevent_setcb(b_client, readcb, NULL, eventcb, b_proxy);
+	bufferevent_setcb(client_bufev, readcb, NULL, eventcb, b_proxy);
+}
+
+static void
+http_conn_close(struct evhttp_connection *conn, void *ctx)
+{
+	time_t now_time; time(&now_time);
+	time_t conn_time = (time_t)ctx;
+	printf("http conn close:%p now_time:%ld conn_time:%ld %ld\n", conn, now_time, conn_time, (now_time - conn_time));
 }
 
 static void create_http_proxy(const string ip, struct evhttp_request *client_req)
@@ -435,9 +492,13 @@ static void create_http_proxy(const string ip, struct evhttp_request *client_req
         printf("evhttp_request_new failed\n");
 		return;
     }
+
+	time_t now_time; time(&now_time);
+	evhttp_connection_set_closecb(proxy_conn, http_conn_close, (void *)now_time);
+	evhttp_connection_set_closecb(evhttp_request_get_connection(client_req), http_conn_close, (void *)now_time);
     
     // 复制请求头
-    http_header_copy(proxy_req, client_req);
+    http_header_copy(client_req, proxy_req, CLIENT_TO_PROXY);
     // 复制请求体
     evbuffer_add_buffer(evhttp_request_get_output_buffer(proxy_req), 
 		evhttp_request_get_input_buffer(client_req));
@@ -488,8 +549,21 @@ static void proxy_request_cb(struct evhttp_request *req, void *arg)
 	printf("Received a %s request for %s host:%s port:%d \n",
 	    cmdtype, evhttp_request_get_uri(req), evhttp_request_get_host(req), 
 		evhttp_uri_get_port(evhttp_request_get_evhttp_uri(req)));
+	
+	if (evhttp_request_get_host(req) == NULL) {
+		printf("error not host\n");
+		return;
+	}
 
     string ip = LibeventCtx.GetDns(evhttp_request_get_host(req));
+
+	struct sockaddr sa;
+	int len = sizeof(sa);
+	// host可能就是IP地址，不需要dns解析
+	if (0 == evutil_parse_sockaddr_port(evhttp_request_get_host(req), &sa, &len)) {
+		ip = evhttp_request_get_host(req);
+	}
+
     if (!ip.empty()) {
         printf("get dns cache %s:%s\n", evhttp_request_get_host(req), ip.c_str());
         if (evhttp_request_get_command(req) == EVHTTP_REQ_CONNECT) {
@@ -507,7 +581,7 @@ static void proxy_request_cb(struct evhttp_request *req, void *arg)
 static void exit_request_cb(struct evhttp_request *req, void *arg)
 {
 	evhttp_send_reply(req, 200, "OK", NULL);
-	event_base_loopexit(LibeventCtx.GetEventBase(), NULL);
+	event_base_loopbreak(LibeventCtx.GetEventBase());
 	printf("exit_request_cb...\n");
 }
 
@@ -524,7 +598,18 @@ void LibeventContext::RegisterHttpHandler()
 void *RunHttpProxy(void *args)
 {
 	cout << "http_proxy thread start!" << endl;
+
+	int ret = LibeventCtx.InitLibevent();
+    if (ret != 0) {
+        cout << "InitLibevent error:" << ret << endl;
+		return NULL;
+    }
+
+    LibeventCtx.RegisterHttpHandler();
+
     event_base_dispatch(LibeventCtx.GetEventBase());
+
+	LibeventCtx.UninitLibevent();
 	cout << "http_proxy thread exit!" << endl;
 	pthread_exit(NULL);
 }
@@ -538,14 +623,6 @@ int InitProxy(int argc, char **argv)
         return ret;
     }
 
-    ret = LibeventCtx.InitLibevent();
-    if (ret != 0) {
-        cout << "InitLibevent error:" << ret << endl;
-        return ret;
-    }
-
-    LibeventCtx.RegisterHttpHandler();
-
 	ret = pthread_create(LibeventCtx.GetTid(), NULL, RunHttpProxy, NULL);
 	if (ret != 0) {
 		cout << "pthread_create error:" << ret << endl;
@@ -557,9 +634,9 @@ int InitProxy(int argc, char **argv)
 
 int main(int argc, char **argv)
 {
-    InitProxy(argc, argv);
+	InitProxy(argc, argv);
 	cout << "main pthread_join" << endl;
-	pthread_join(*(LibeventCtx.GetTid()), NULL);	
+	pthread_join(*(LibeventCtx.GetTid()), NULL);
 	cout << "main exit!" << endl;
 	exit(0);
 }
